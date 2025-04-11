@@ -20,14 +20,19 @@ int shootingIntervalSec = 60;
 int maxWiFiConnectAttempts = 20;
 int wifiReconnectDelay = 500;   // millisecond
 int maxUploadRetries = 3;
+int maxCaptureRetries = 8;
 
 // Variables to store in RTC memory (retained after deep sleep)
 RTC_DATA_ATTR int bootCount = 0;
 RTC_DATA_ATTR int failedUploadCount = 0;
+RTC_DATA_ATTR int lastLightLevel = 128; // Remember last light level
+// Store camera settings in RTC memory
+RTC_DATA_ATTR int currentBrightness = 1;
+RTC_DATA_ATTR int currentAecValue = 300;
 
 void setup() {
   Serial.begin(115200);
-  delay(10);
+  delay(100); // To stabilize communication
 
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 
@@ -35,6 +40,8 @@ void setup() {
   Serial.println("Boot number: " + String(bootCount));
   Serial.println("Failed upload count: " + String(failedUploadCount));
 
+  delay(500); // wait a while after launching
+  
   initCamera();
   initWiFi();
 
@@ -78,6 +85,9 @@ void loop() {
 }
 
 void initCamera() {
+  esp_camera_deinit();
+  delay(100);
+
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -101,8 +111,8 @@ void initCamera() {
   config.pixel_format = PIXFORMAT_JPEG;
   config.frame_size = FRAMESIZE_UXGA;  // UXGA|SXGA|XGA|SVGA|VGA|CIF|QVGA|HQVGA|QQVGA
   config.jpeg_quality = 5;
-  config.fb_count     = 1;
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY; //CAMERA_GRAB_LATEST;
+  config.fb_count = 1;
+  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
 
   esp_err_t err = esp_camera_init(&config);
 
@@ -113,15 +123,120 @@ void initCamera() {
   }
 
   sensor_t * s = esp_camera_sensor_get();
-  //initial sensors are flipped vertically and colors are a bit saturated
-  s->set_vflip(s, 1);//flip it back
-  s->set_brightness(s, -1);//up the blightness just a bit　Setting OV3660 closer to OV2640
-  s->set_saturation(s, 2);//lower the saturation　Setting OV3660 closer to OV2640
-  s->set_denoise(s, 1);//Setting OV3660 closer to OV2640
-  s->set_contrast(s, 1);//Setting OV3660 closer to OV2640
-  //drop down frame size for higher initial frame rate
-  // s->set_framesize(s, FRAMESIZE_SXGA);
-  delay(1000);
+  s->set_vflip(s, 1);
+
+  // Basic camera settings
+  s->set_saturation(s, 3); // Maintain saturation
+  s->set_denoise(s, 1);    // Enable noise reduction
+  s->set_sharpness(s, 1);  // Sharpness setting
+
+  // Auto mode settings (important)
+  s->set_exposure_ctrl(s, 1);  // Enable automatic exposure control
+  s->set_gain_ctrl(s, 1);      // Enable automatic gain control
+  s->set_whitebal(s, 1);       // Enable automatic white balance
+  s->set_awb_gain(s, 1);       // Enable AWB gain
+  s->set_aec2(s, 1);           // Enable AEC automatic exposure correction
+
+  // Start with intermediate values for brightness and contrast
+  s->set_brightness(s, currentBrightness);  // Restore from RTC variable
+  s->set_contrast(s, 1);       // Standard contrast
+
+  // Special settings - adjustments for low light environments
+  // Set AEC maximum and minimum values (exposure control over wider range)
+  s->set_aec_value(s, currentAecValue);  // Restore from RTC variable
+
+  delay(2000);  // Ensure wait time after camera initialization
+
+  // Perform test capture to evaluate environment brightness
+  camera_fb_t * test_fb = NULL;
+  for (int i = 0; i < 3; i++) {
+    test_fb = esp_camera_fb_get();
+    if (test_fb) {
+      // Evaluate image brightness
+      uint32_t brightness = evaluateImageBrightness(test_fb);
+      Serial.println("Image brightness level: " + String(brightness));
+      
+      // Adjust settings based on previous and current brightness
+      adjustCameraSettings(s, brightness);
+      
+      esp_camera_fb_return(test_fb);
+      Serial.println("Test capture " + String(i+1) + " done");
+    }
+    delay(500);
+  }
+}
+
+uint32_t evaluateImageBrightness(camera_fb_t *fb) {
+  if (!fb || fb->len < 100) return 128; // Default value
+  
+  // Sample first 100 bytes of JPEG to estimate brightness
+  uint32_t sum = 0;
+  int samples = 0;
+  
+  // Get more samples (up to 1000 bytes)
+  for (size_t i = 0; i < fb->len && i < 1000; i++) {
+    if (i % 10 == 0) {  // Sample every 10 bytes
+      sum += fb->buf[i];
+      samples++;
+    }
+  }
+  
+  if (samples == 0) return 128;
+  return sum / samples;
+}
+
+// Function to adjust camera settings based on brightness
+void adjustCameraSettings(sensor_t *s, uint32_t brightness) {
+  Serial.println("Adjusting camera settings based on brightness: " + String(brightness));
+  
+  // Adaptively change settings based on brightness level
+  if (brightness < 60) {  // Very dark environment
+    Serial.println("Very low light conditions detected");
+    currentBrightness = 2;           // Maximum brightness
+    s->set_brightness(s, currentBrightness);
+    s->set_contrast(s, 0);           // Lower contrast
+    s->set_saturation(s, 4);         // Increase saturation
+    currentAecValue = 600;           // Set high exposure value
+    s->set_aec_value(s, currentAecValue);
+    s->set_gainceiling(s, GAINCEILING_32X); // Maximum gain ceiling
+    s->set_lenc(s, 1);               // Enable lens correction
+  } 
+  else if (brightness < 90) {  // Dark environment
+    Serial.println("Low light conditions detected");
+    currentBrightness = 1;           // Increase brightness
+    s->set_brightness(s, currentBrightness);
+    s->set_contrast(s, 1);           // Lower contrast
+    s->set_saturation(s, 3);         // Maintain saturation
+    currentAecValue = 400;           // Increase exposure value
+    s->set_aec_value(s, currentAecValue);
+    s->set_gainceiling(s, GAINCEILING_16X); // Increase gain ceiling
+  }
+  else if (brightness > 180) {  // Very bright environment
+    Serial.println("Very bright conditions detected");
+    currentBrightness = 0;           // Lower brightness
+    s->set_brightness(s, currentBrightness);
+    s->set_contrast(s, 2);           // Increase contrast
+    s->set_saturation(s, 2);         // Lower saturation
+    currentAecValue = 100;           // Lower exposure value
+    s->set_aec_value(s, currentAecValue);
+    s->set_gainceiling(s, GAINCEILING_2X); // Lower gain ceiling
+  }
+  else {  // Standard brightness
+    Serial.println("Normal lighting conditions");
+    currentBrightness = 0;           // Standard brightness
+    s->set_brightness(s, currentBrightness);
+    s->set_contrast(s, 2);           // Standard contrast
+    s->set_saturation(s, 2);         // Standard saturation
+    currentAecValue = 350;           // Standard exposure value
+    s->set_aec_value(s, currentAecValue);
+    s->set_gainceiling(s, GAINCEILING_8X); // Standard gain
+  }
+
+  // Save brightness level
+  lastLightLevel = brightness;
+
+  // Wait for new settings to be applied
+  delay(500);
 }
 
 void initWiFi() {
@@ -153,16 +268,16 @@ void initWiFi() {
 bool reconnectWiFi() {
   WiFi.disconnect();
   delay(100);
-  
+
   WiFi.begin(ssid, password);
-  
+
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < maxWiFiConnectAttempts) {
     Serial.print(".");
     delay(wifiReconnectDelay);
     attempts++;
   }
-  
+
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("");
     Serial.println("WiFi reconnected");
@@ -179,29 +294,99 @@ bool reconnectWiFi() {
 bool saveCapturedImage() {
   Serial.println("Connect to " + String(myDomain));
   WiFiClientSecure client;
-  
+
   int retryCount = 0;
   bool uploadSuccess = false;
-  
+
   while (!uploadSuccess && retryCount < maxUploadRetries) {
     client.setInsecure();
     
     if (client.connect(myDomain, 443)) {
       Serial.println("Connection successful");
-
-      camera_fb_t * fb = esp_camera_fb_get(); //Discard the first one
-      esp_camera_fb_return(fb); //Discard the first one
-      fb = esp_camera_fb_get();  //Save here
-      if(!fb) {
-        Serial.println("Camera capture failed");
+      
+      // Improve camera capture reliability
+      Serial.println("Preparing camera...");
+      delay(800);  // Wait longer before capture
+      
+      // Try multiple capture attempts
+      int captureRetries = 0;
+      camera_fb_t * fb = NULL;
+      sensor_t * s = esp_camera_sensor_get();
+      
+      while (captureRetries < maxCaptureRetries && fb == NULL) {
+        Serial.println("Attempting camera capture " + String(captureRetries + 1) + "...");
+        
+        // Adjust settings as capture attempts increase
+        if (captureRetries > 0) {
+          // Use RTC variables to get current settings (instead of using get_ methods)
+          // Gradually increase sensitivity with retries
+          currentBrightness = min(currentBrightness + 1, 2);
+          s->set_brightness(s, currentBrightness);
+          currentAecValue = min(currentAecValue + 100, 800);
+          s->set_aec_value(s, currentAecValue);
+          
+          Serial.println("Adjusted settings - Brightness: " + String(currentBrightness) + ", AEC: " + String(currentAecValue));
+          
+          if (captureRetries >= 3) {
+            // For darker conditions, increase gain ceiling
+            s->set_gainceiling(s, GAINCEILING_32X);
+          }
+          
+          Serial.println("Adjusted camera settings for retry");
+          delay(500); // Wait for settings to apply
+        }
+        
+        // Add delay for auto exposure stabilization
+        delay(500);
+        
+        // Try to get a frame
+        fb = esp_camera_fb_get();
+        
+        if (fb != NULL) {
+          Serial.println("Capture successful!");
+          Serial.printf("Size: %u bytes, %u x %u resolution\n", fb->len, fb->width, fb->height);
+          
+          // Evaluate image brightness
+          uint32_t brightness = evaluateImageBrightness(fb);
+          Serial.println("Captured image brightness: " + String(brightness));
+          
+          // Very dark image but use it anyway
+          if (brightness < 30 && captureRetries < maxCaptureRetries - 1) {
+            Serial.println("Image too dark, but attempting another capture with adjusted settings");
+            esp_camera_fb_return(fb);
+            fb = NULL;
+            
+            // Significant adjustment for dark image detection
+            currentBrightness = 2;  // Maximum brightness
+            s->set_brightness(s, currentBrightness);
+            s->set_contrast(s, 0);    // Minimum contrast
+            currentAecValue = 800; // Maximum exposure
+            s->set_aec_value(s, currentAecValue);
+            s->set_gainceiling(s, GAINCEILING_32X); // Maximum gain
+            
+            delay(800); // Wait until the settings are applied
+          } else {
+            // When the brightness is within acceptable range or the maximum number of retries is reached
+            break;
+          }
+        } else {
+          Serial.println("Camera capture failed, retry " + String(captureRetries + 1) + " of " + String(maxCaptureRetries));
+          captureRetries++;
+          delay(1000); // Wait before next attempt
+        }
+      }
+      
+      if (!fb) {
+        Serial.println("Camera capture failed after multiple attempts");
         client.stop();
         retryCount++;
-        delay(1000);
+        delay(2000);
         continue;
       }
-      Serial.printf("frame buffer size: %u x %u\n", fb->width, fb->height);
       
-      Serial.println("Step 1: calicurating data size...");    // Count the size of Base64 and urlencoded data.
+      Serial.printf("Frame buffer size: %u x %u\n", fb->width, fb->height);
+      
+      Serial.println("Step 1: calculating data size...");    // Count the size of Base64 and urlencoded data.
 
       int index = 0;
       uint8_t *p = fb->buf;
@@ -223,13 +408,13 @@ bool saveCapturedImage() {
       }
       Serial.printf("frame buffer size: %u\n", fb->len);
       Serial.printf("after Base64 encoding: %u\n", base64EncodedSize);
-      Serial.printf("frame buffer size: %u\n", urlencodedSize);
+      Serial.printf("after URL encoding: %u\n", urlencodedSize);
 
       Serial.println("Step 2: Sending a captured image to Google Drive.");
       String Data = myFilename + mimeType + myImage;    // The beginning of the data sent by POST. This is followed by the Base64 version of the image.
       client.println("POST " + myScript + " HTTP/1.1");
       client.println("Host: " + String(myDomain));
-      client.println("Content-Length: " + String(Data.length() + urlencodedSize));    // Step 1 is required here because we need to write the length of the data.
+      client.println("Content-Length: " + String(Data.length() + urlencodedSize));
       client.println("Content-Type: application/x-www-form-urlencoded");
       client.println();
       client.print(Data);
@@ -301,7 +486,7 @@ bool saveCapturedImage() {
       delay(2000);
     }
   }
-  
+
   return uploadSuccess;
 }
 

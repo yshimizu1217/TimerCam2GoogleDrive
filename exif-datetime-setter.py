@@ -7,7 +7,7 @@ import re
 import sys
 
 def get_datetime_from_filename(filename):
-    """ファイル名からyyyyMMddHHmmssのパターンを抽出して日時を取得"""
+    """Extract datetime pattern yyyyMMddHHmmss from filename and get datetime"""
     pattern = r'(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})'
     match = re.search(pattern, filename)
     
@@ -24,10 +24,10 @@ def get_datetime_from_filename(filename):
     return None
 
 def has_datetime_exif(image_path):
-    """画像が既にDateTimeOriginalのEXIF情報を持っているかチェック"""
+    """Check if image already has DateTimeOriginal EXIF information"""
     try:
         exif_data = piexif.load(image_path)
-        # DateTimeOriginalが存在するかチェック
+        # Check if DateTimeOriginal exists
         if "Exif" in exif_data and piexif.ExifIFD.DateTimeOriginal in exif_data["Exif"]:
             return True
         return False
@@ -35,15 +35,15 @@ def has_datetime_exif(image_path):
         return False
 
 def set_exif_datetime(image_path, dt):
-    """画像ファイルのEXIFに日時情報を設定"""
+    """Set datetime information in EXIF of image file"""
     if dt is None:
         return False
     
     try:
-        # 日時フォーマットをEXIF形式に変換
+        # Convert datetime format to EXIF format
         exif_datetime = dt.strftime("%Y:%m:%d %H:%M:%S")
         
-        # 既存のEXIF情報を取得
+        # Get existing EXIF information
         exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
         try:
             exif_data = piexif.load(image_path)
@@ -52,13 +52,13 @@ def set_exif_datetime(image_path, dt):
         except:
             pass
         
-        # EXIF情報に日時を追加
-        # DateTimeOriginal, DateTimeDigitized, DateTime を設定
+        # Add datetime to EXIF information
+        # Set DateTimeOriginal, DateTimeDigitized, DateTime
         exif_dict["0th"][piexif.ImageIFD.DateTime] = exif_datetime
         exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal] = exif_datetime
         exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized] = exif_datetime
         
-        # EXIFを画像に書き込み
+        # Write EXIF to image
         exif_bytes = piexif.dump(exif_dict)
         piexif.insert(exif_bytes, image_path)
         return True
@@ -67,7 +67,7 @@ def set_exif_datetime(image_path, dt):
         return False
 
 def process_directory(directory, force_update=False):
-    """指定ディレクトリ内のJPGファイルを処理"""
+    """Process JPG files in the specified directory"""
     success_count = 0
     failed_count = 0
     skipped_count = 0
@@ -81,17 +81,17 @@ def process_directory(directory, force_update=False):
     for idx, filename in enumerate(jpg_files):
         file_path = os.path.join(directory, filename)
         
-        # 既に処理済みかチェック（force_updateがFalseの場合のみ）
+        # Check if already processed (only if force_update is False)
         if not force_update and has_datetime_exif(file_path):
             already_processed_count += 1
             print(f"[{idx+1}/{total_files}] Skipped {filename}: already has EXIF datetime")
             continue
         
-        # ファイル名から日時を取得
+        # Get datetime from filename
         dt = get_datetime_from_filename(filename)
         
         if dt:
-            # EXIF情報を設定
+            # Set EXIF information
             if set_exif_datetime(file_path, dt):
                 success_count += 1
                 print(f"[{idx+1}/{total_files}] Set EXIF datetime for {filename}: {dt}")
@@ -110,7 +110,7 @@ def process_directory(directory, force_update=False):
     print(f"Skipped (already processed): {already_processed_count}")
 
 if __name__ == "__main__":
-    # コマンドライン引数からディレクトリとオプションを取得
+    # Get directory and options from command line arguments
     import argparse
     
     parser = argparse.ArgumentParser(description='Set EXIF datetime from filename pattern yyyyMMddHHmmss.')
@@ -128,10 +128,10 @@ if __name__ == "__main__":
     print(f"Force update: {'Yes' if args.force else 'No'}")
     
     if args.recursive:
-        # 再帰的に処理
+        # Process recursively
         for root, _, _ in os.walk(args.directory):
             print(f"\nProcessing subdirectory: {root}")
             process_directory(root, args.force)
     else:
-        # 単一ディレクトリのみ処理
+        # Process single directory only
         process_directory(args.directory, args.force)
